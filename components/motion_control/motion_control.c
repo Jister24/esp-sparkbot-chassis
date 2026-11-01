@@ -31,6 +31,23 @@
 float m1_coefficient = 1.0;
 float m2_coefficient = 1.0;
 
+/*
+ * 电机极性补偿。
+ *
+ * 协议层（left = y + x、right = y - x）保持不变，这里只处理「实车某一侧电机的
+ * 两条线接反了」这种装配差异。接反的典型症状很好认：
+ *
+ *   直行指令 x0 y1  → 两侧输出同号，物理上却一正一反 → 原地打转
+ *   转向指令 x1 y0  → 两侧输出反号，物理上却同向     → 直着走
+ *
+ * 也就是「前后」和「左右」看起来像被对调了。本机实测右侧接反，所以把
+ * MOTOR_RIGHT_INVERT 置 1；如果换线修好了硬件，把这里改回 0 即可。
+ * 放在 PWM 输出侧而不是运动学公式里，是为了让 dance 这类直接写左右速度的
+ * 动作也一起被纠正。
+ */
+#define MOTOR_LEFT_INVERT   0
+#define MOTOR_RIGHT_INVERT  1
+
 void motor_ledc_init(void)
 {
     // Prepare and then apply the LEDC PWM timer configuration
@@ -62,6 +79,9 @@ void motor_ledc_init(void)
 
 static void set_left_motor_speed(int speed)
 {
+    if (MOTOR_LEFT_INVERT) {
+        speed = -speed;
+    }
     if (speed >= 0) {
         uint32_t m1a_duty = (uint32_t)((speed * m1_coefficient * 8192) / 100);
         ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M1_CHANNEL_A, m1a_duty));
@@ -79,6 +99,9 @@ static void set_left_motor_speed(int speed)
 
 static void set_right_motor_speed(int speed)
 {
+    if (MOTOR_RIGHT_INVERT) {
+        speed = -speed;
+    }
     if (speed >= 0) {
         uint32_t m2a_duty = (uint32_t)((speed * m2_coefficient * 8192) / 100);
         ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M2_CHANNEL_A, m2a_duty));

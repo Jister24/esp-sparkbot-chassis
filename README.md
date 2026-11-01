@@ -24,6 +24,7 @@
 | `components/power_management/include/power_management.h` | 新增 `battery_voltage_mv()` / `battery_percent()` / `battery_is_charging()` |
 | `components/power_management/power_management.c` | 把采样结果存进静态快照（百分比夹到 0~100），对外提供读取函数 |
 | `main/tracked_chassis.c` | 新增 `b` 命令；**去掉原来的原样回显**（主体板开始读 UART 后回显是纯噪声） |
+| `components/motion_control/motion_control.c` | 新增 `MOTOR_LEFT_INVERT` / `MOTOR_RIGHT_INVERT` 极性补偿（见下） |
 | `sdkconfig.defaults` | 补上 `CONFIG_ESP_CONSOLE_UART_BAUDRATE=74880`，让新 clone 的构建能复现同样的控制台速率 |
 
 ## 硬件
@@ -90,6 +91,36 @@ USB 线只负责看日志和烧固件，发运动指令还得走磁吸口。
 
 **回显**：上游会把收到的内容原样写回 UART1。本仓去掉了，因为主体板现在靠这条线读电量，
 回显对收端全是噪声。
+
+## 方向约定与电机极性补偿
+
+运动学就是标准差速：`left = y + x`、`right = y - x`（×100 当占空比）。所以
+
+- `x0 y1` → 两侧都 +100 → 直行
+- `x1 y0` → 左 +100 / 右 -100 → 原地右转
+- `x0.7 y0.7` → 外侧满速、内侧停转 → 最大斜向弧线
+
+**装配差异在这里会伪装成「前后和左右反了」**：如果某一侧电机的两根线接反了，两侧输出
+符号就整体错位，症状非常一致：
+
+| 发的指令 | 正常应该 | 一侧接反时 |
+|---|---|---|
+| `x0 y1`（前进） | 直行 | **原地打转** |
+| `x1 y0`（右转） | 原地右转 | **直着走** |
+
+很容易误判成「x 和 y 被对调了」，其实是同一件事的另一种说法：输出同号时物理上反号、
+输出反号时物理上同号。修法不是改公式，而是在 PWM 输出侧把反的那一侧取反：
+
+```c
+#define MOTOR_LEFT_INVERT   0
+#define MOTOR_RIGHT_INVERT  1   // 本机实测右侧接反
+```
+
+放在 `set_left/right_motor_speed()` 里而不是 `spark_bot_motion_control()` 里，是为了让
+`d1` 跳舞这类直接写左右速度的动作也一起被纠正。换成原厂线序或重新焊接之后，把对应位
+改回 `0` 即可。
+
+> 判据：如果 `x0 y1` 原地转、但 `x1 y0` 是**往后**直行，那反的是另一侧，把两个宏对调。
 
 ## 编译
 
