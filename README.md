@@ -38,20 +38,39 @@
 主体板 S3 GPIO48 (RX)  ←──  C2 GPIO10 (UART1 TX)
 ```
 
-**底盘上那个 USB 口只接了供电。** ESP32-C2 芯片本身没有 USB 外设，插上电脑不会有任何
-设备枚举出来——这不是驱动问题，换什么线都一样。
+### 底盘上的 USB 口是数据口
+
+C2 芯片本身确实没有 USB 外设，但底盘 PCB 上**板载了一颗 USB-UART 桥（CH340，`0x1A86:0x7523`）**，
+USB 口接的是这颗桥，桥的另一侧接 C2 的 **UART0（控制台，GPIO20/19）**。所以：
+
+| 项 | 表现 |
+|---|---|
+| 枚举 | 插上就出现 `USB Serial`，macOS 26 **免驱**，端口 `/dev/cu.usbserial-XXXX` |
+| 读日志 | 74880 8N1，能直接看到 C2 从 ROM 到 app 的完整启动过程 |
+| 复位 | 打开串口会重启一次（DTR/RTS 接了 EN/GPIO9 的自动下载电路） |
+| 烧写 | **能烧**，`esptool` 可直接进 ROM 下载模式，不需要飞线 |
+
+也就是说**一根 USB 线就能看日志、能刷固件**。注意别把两根 USB 线搞混：
+
+| 设备 | 端口形态 | 说明 |
+|---|---|---|
+| 履带底盘 | `usbserial-XXXX`（CH340 桥） | C2，控制台 74880 |
+| 主体板 | `usbmodemXXXX`（ESP32-S3 原生 USB-Serial-JTAG，`0x303A:0x1001`） | S3，走 USB 直连 |
+
+两个都插着时会同时出现，认芯片 VID 最稳：`0x1A86` 是底盘，`0x303A` 是主体板。
 
 ## 串口速查（最容易踩的坑）
 
 底盘有**两个**独立串口，各管一摊：
 
-| 口 | 引脚 | 波特率 | 用途 |
-|---|---|---|---|
-| UART0 | GPIO20 (TX) / GPIO19 (RX) | **74880** | 控制台，只往外打日志，**不解析任何输入** |
-| UART1 | GPIO10 (TX) / GPIO18 (RX) | 115200 | 主机指令口，就是 4P 磁吸口 |
+| 口 | 引脚 | 波特率 | 用途 | 怎么接 |
+|---|---|---|---|---|
+| UART0 | GPIO20 (TX) / GPIO19 (RX) | **74880** | 控制台：只往外打日志，**不解析任何输入** | 板载 CH340 → 底盘 USB 口 |
+| UART1 | GPIO10 (TX) / GPIO18 (RX) | 115200 | 主机指令口 | 4P 磁吸口 → 主体板 GPIO38/48 |
 
 所以：**用 115200 读控制台必然是乱码**（实测可读率 31.9%，换 74880 就是 100%）；
-而往控制台上发 `b0`、`x y` 没有反应也是正常的——解析逻辑在 UART1 上。
+而往控制台上发 `b0`、`x y` 没有反应也是正常的——解析逻辑在 UART1 上，不在 USB 那一侧。
+USB 线只负责看日志和烧固件，发运动指令还得走磁吸口。
 
 ## 通信协议（UART1，115200 8N1）
 
@@ -83,13 +102,10 @@ idf.py build                   # sdkconfig.defaults 已指定 esp32c2 目标
 
 ## 烧写
 
-C2 的 `EN` 和 `GPIO9`（BOOT）都引到了测试点，必须飞线，光接 TX/RX 是进不去下载模式的：
+**一根 USB 线，插底盘自己的 USB 口就行，不用飞线、不用拆壳。**
 
-```
-3V3 / GND / U0TXD(GPIO20) / U0RXD(GPIO19) / EN / GPIO9
-```
-
-USB-TTL 用 CH340 或 CP2102 都行，3.3V 电平，**共地一定要接**。
+板载 CH340 的 DTR/RTS 已经接到 C2 的 `EN` / `GPIO9`，`esptool` 能自动把芯片拽进 ROM
+下载模式——插上口直接烧：
 
 ```bash
 # 先备份整片（2MB）
@@ -99,20 +115,32 @@ esptool.py -p /dev/cu.usbserial-XXXX -b 115200 read_flash 0 0x200000 chassis_bac
 idf.py -p /dev/cu.usbserial-XXXX -b 115200 app-flash
 ```
 
-**CH340 在 460800 下会丢字节**（`expected 0x1000 but received 0xffc`），读写都降到 115200，
-2MB 备份大约 190 秒。
+两个坑：**CH340 在 460800 下会丢字节**（`expected 0x1000 but received 0xffc`），读写都降到
+115200，2MB 备份大约 190 秒；**控制台是 74880 不是 115200**，读日志要按 74880 开，
+读不出来是乱码不是没起来。
+
+不想装 ESP-IDF 时，也可以用 Release 里那份 `tracked_chassis.bin` 直接写 app 分区：
+
+```bash
+esptool.py -p /dev/cu.usbserial-XXXX -b 115200 write_flash 0x10000 tracked_chassis.bin
+```
+
+> 早期文档写过「USB 口只供电、必须飞线测试点」，那是错的。实测 USB 口就是数据口，
+> 上面整套流程都是从这个口跑通的。
 
 ## 验证
 
-刷完打开控制台（74880），主体板连着的话每 5 秒会出现一行：
+刷完保持 USB 连着，按 **74880** 打开控制台，主体板连着的话每 5 秒会出现一行：
 
 ```
 I (5420)  Tracked-Chassis: Command: b, Value: 0.00
 I (10430) Tracked-Chassis: Command: b, Value: 0.00
 ```
 
-这是主体板 `ChassisBattery` 在轮询，出现即说明链路双向通、补丁生效。再确认 App 的电源卡
-里底盘那张有百分比，就完全通了。
+这是主体板 `ChassisBattery` 在轮询，出现即说明 UART1 链路双向通、补丁生效。再确认 App
+的电源卡里底盘那张有百分比，就完全通了。
+
+刷完拔掉 USB 前确认一下 `rst:0x1 (POWERON)` 之后没有 `Guru Meditation` / 反复重启，就没问题。
 
 ## 相关仓库
 
