@@ -1,0 +1,8 @@
+CONFIG_IDF_TARGET="esp32c2"
+
+# 板子实际是 26MHz 晶振。上游原话：Bypass a bug. Use 26M XTAL Freq
+CONFIG_XTAL_FREQ_26=y
+
+# 控制台 UART0 用 74880，沿用出厂固件。默认的 115200 读出来全是乱码，
+# 这个值原本只存在于被 .gitignore 掉的 sdkconfig 里，挪到这里才能复现。
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=74880

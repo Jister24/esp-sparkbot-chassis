@@ -1,0 +1,11 @@
+# ESP-IDF 构建产物
+build/
+build_esp*/
+sdkconfig
+sdkconfig.old
+
+# 组件管理器拉下来的依赖（由 dependencies.lock 锁定版本，可重新下载）
+managed_components/
+
+.DS_Store
+.vscode/
