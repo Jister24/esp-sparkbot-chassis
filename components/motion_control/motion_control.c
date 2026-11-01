@@ -32,21 +32,28 @@ float m1_coefficient = 1.0;
 float m2_coefficient = 1.0;
 
 /*
- * 电机极性补偿。
+ * 接线补偿（本机实测，与上游参考板相反）
+ * ---------------------------------------------------------------------------
+ * 上游代码的假设是：M1(GPIO4/5) = 左轮、M2(GPIO6/7) = 右轮，正转即前进。
+ * 本机实测的接线是：
  *
- * 协议层（left = y + x、right = y - x）保持不变，这里只处理「实车某一侧电机的
- * 两条线接反了」这种装配差异。接反的典型症状很好认：
+ *   M1(GPIO4/5) → 物理【右】轮，正 = 前进
+ *   M2(GPIO6/7) → 物理【左】轮，正 = 后退     ← 极性也反了
  *
- *   直行指令 x0 y1  → 两侧输出同号，物理上却一正一反 → 原地打转
- *   转向指令 x1 y0  → 两侧输出反号，物理上却同向     → 直着走
+ * 于是用原厂代码会得到两个很迷惑的症状（都验证过）：
  *
- * 也就是「前后」和「左右」看起来像被对调了。本机实测右侧接反，所以把
- * MOTOR_RIGHT_INVERT 置 1；如果换线修好了硬件，把这里改回 0 即可。
- * 放在 PWM 输出侧而不是运动学公式里，是为了让 dance 这类直接写左右速度的
- * 动作也一起被纠正。
+ *   1) 直行 x0 y1：两侧输出同号，物理上却一正一反  → 原地打转
+ *      转向 x1 y0：两侧输出反号，物理上却同向      → 直着走
+ *      —— 看起来像「前后和左右被对调」。
+ *   2) 只修极性后直行恢复正常，但左右转向镜像。
+ *
+ * 正确做法是按实测接线重新分配通道（下面是 LEFT/RIGHT 各自用的通道），
+ * 再对极性反的那一侧取反。这样运动学公式仍然是标准的 left=y+x / right=y-x，
+ * dance 那种直接写左右速度的动作也一并正确。
+ * 换成原厂线序后把通道改回 M1=左、M2=右，两个 INVERT 都置 0 即可。
  */
-#define MOTOR_LEFT_INVERT   0
-#define MOTOR_RIGHT_INVERT  1
+#define MOTOR_LEFT_INVERT   1   // 左轮走 M2，且 M2 正转是后退，故取反
+#define MOTOR_RIGHT_INVERT  0   // 右轮走 M1，正转即前进
 
 void motor_ledc_init(void)
 {
@@ -77,24 +84,32 @@ void motor_ledc_init(void)
     }
 }
 
+// 驱动一组 H 桥：ch_a 走正转、ch_b 走反转。传进来的 speed 已经是「物理前进为正」。
+static void drive_motor(ledc_channel_t ch_a, ledc_channel_t ch_b, int speed, float coefficient)
+{
+    if (speed >= 0) {
+        uint32_t duty = (uint32_t)((speed * coefficient * 8192) / 100);
+        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, ch_a, duty));
+        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, ch_a));
+        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, ch_b, 0));
+        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, ch_b));
+    } else {
+        uint32_t duty = (uint32_t)((-speed * coefficient * 8192) / 100);
+        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, ch_a, 0));
+        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, ch_a));
+        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, ch_b, duty));
+        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, ch_b));
+    }
+}
+
+// 左轮挂在 M2 上（见上面的接线说明），系数也跟着硬件通道走，
+// 这样 `c` 命令标定的仍然是 M1/M2 两颗真实电机。
 static void set_left_motor_speed(int speed)
 {
     if (MOTOR_LEFT_INVERT) {
         speed = -speed;
     }
-    if (speed >= 0) {
-        uint32_t m1a_duty = (uint32_t)((speed * m1_coefficient * 8192) / 100);
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M1_CHANNEL_A, m1a_duty));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M1_CHANNEL_A));
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M1_CHANNEL_B, 0));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M1_CHANNEL_B));
-    } else {
-        uint32_t m1b_duty = (uint32_t)((-speed * m1_coefficient * 8192) / 100);
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M1_CHANNEL_A, 0));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M1_CHANNEL_A));
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M1_CHANNEL_B, m1b_duty));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M1_CHANNEL_B));
-    }
+    drive_motor(LEDC_M2_CHANNEL_A, LEDC_M2_CHANNEL_B, speed, m2_coefficient);
 }
 
 static void set_right_motor_speed(int speed)
@@ -102,19 +117,7 @@ static void set_right_motor_speed(int speed)
     if (MOTOR_RIGHT_INVERT) {
         speed = -speed;
     }
-    if (speed >= 0) {
-        uint32_t m2a_duty = (uint32_t)((speed * m2_coefficient * 8192) / 100);
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M2_CHANNEL_A, m2a_duty));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M2_CHANNEL_A));
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M2_CHANNEL_B, 0));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M2_CHANNEL_B));
-    } else {
-        uint32_t m2b_duty = (uint32_t)((-speed * m2_coefficient * 8192) / 100);
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M2_CHANNEL_A, 0));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M2_CHANNEL_A));
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_M2_CHANNEL_B, m2b_duty));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_M2_CHANNEL_B));
-    }
+    drive_motor(LEDC_M1_CHANNEL_A, LEDC_M1_CHANNEL_B, speed, m1_coefficient);
 }
 
 void spark_bot_motion_control(float x, float y)
